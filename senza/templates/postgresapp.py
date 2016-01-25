@@ -101,6 +101,12 @@ SenzaComponents:
           PGPASSWORD_SUPERUSER: "{{pgpassword_superuser}}"
           PGPASSWORD_ADMIN: "{{pgpassword_admin}}"
           PGPASSWORD_STANDBY: "{{pgpassword_standby}}"
+          {{#ssl_certificate}}
+          SSL_CERTIFICATE: "{{ssl_certificate}}"
+          {{/ssl_certificate}}
+          {{#ssl_private_key}}
+          SSL_PRIVATE_KEY: "{{ssl_private_key}}"
+          {{/ssl_private_key}}
         root: True
         mounts:
           /home/postgres/pgdata:
@@ -363,6 +369,8 @@ def set_default_variables(variables):
     variables.setdefault('postgres_port', POSTGRES_PORT)
     variables.setdefault('scalyr_account_key', None)
     variables.setdefault('snapshot_id', None)
+    variables.setdefault('ssl_certificate', None)
+    variables.setdefault('ssl_private_key', None)
     variables.setdefault('use_ebs', True)
     variables.setdefault('volume_iops', 300)
     variables.setdefault('volume_size', 10)
@@ -447,22 +455,28 @@ def gather_user_variables(variables, region, account_info):
     prompt(variables, 'pgpassword_admin', "Password for PostgreSQL user admin", show_default=True,
            default=defaults['pgpassword_admin'], hide_input=True, confirmation_prompt=True)
 
-    if click.confirm('Do you wish to encrypt these passwords using KMS?', default=False):
-        kms_keys = [k for k in list_kms_keys(region) if 'alias/aws/ebs' not in k['aliases']]
+    if click.confirm('Do you wish to provide an SSL certificate?', default=False):
+        prompt(variables, 'ssl_certificate', 'File containing the SSL certificate', type=click.File('r'))
+        variables['ssl_certificate'] = variables['ssl_certificate'].read()
 
-        if len(kms_keys) == 0:
-            raise click.UsageError('No KMS key is available for encrypting and decrypting. '
-                                   'Ensure you have at least 1 key available.')
+        prompt(variables, 'ssl_private_key', 'File containing the SSL private key', type=click.File('r'))
+        variables['ssl_private_key'] = variables['ssl_private_key'].read()
 
+    kms_keys = [k for k in list_kms_keys(region) if 'alias/aws/ebs' not in k['aliases']]
+    if not kms_keys:
+        click.echo('WARNING: Skipping encryption as no valid KMS keys were found')
+    elif click.confirm('Do you wish to encrypt these secrets using KMS?', default=False):
         options = ['{}: {}'.format(k['KeyId'], k['Description']) for k in kms_keys]
         kms_key = choice(prompt='Please select the encryption key', options=options)
         kms_keyid = kms_key.split(':')[0]
 
         variables['kms_arn'] = [k['Arn'] for k in kms_keys if k['KeyId'] == kms_keyid][0]
 
-        for key in [k for k in variables if k.startswith('pgpassword_')]:
-            encrypted = encrypt(region=region, KeyId=kms_keyid, Plaintext=variables[key], b64encode=True)
-            variables[key] = 'aws:kms:{}'.format(encrypted)
+        keys = [k for k in variables if k.startswith('pgpassword_')] + ['ssl_private_key', 'ssl_certificate']
+        for key in keys:
+            if variables.get(key):
+                encrypted = encrypt(region=region, KeyId=kms_keyid, Plaintext=variables[key], b64encode=True)
+                variables[key] = 'aws:kms:{}'.format(encrypted)
 
     set_default_variables(variables)
 
